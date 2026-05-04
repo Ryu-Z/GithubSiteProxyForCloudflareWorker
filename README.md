@@ -10,14 +10,16 @@
 - **完整的资源映射**：支持GitHub相关的所有主要域名，包括API、静态资源、用户内容等
 - **内容替换**：自动替换响应中的所有域名引用，确保链接正常工作
 - **路径修复**：解决嵌套URL路径问题，特别针对仓库提交信息等特殊路径
-- **安全重定向**：对敏感路径（如登录页面）进行安全重定向
+- **登录代理**：支持 GitHub 登录相关的 `Cookie`、`Set-Cookie`、`Location`、`Origin` 和 `Referer` 改写
+- **边缘缓存**：使用 Cloudflare Worker Cache API 缓存匿名静态资源，登录态请求默认绕过缓存
+- **安全重定向**：可通过 `redirect_paths` 对指定敏感路径返回 404
 - **HTTPS强制**：自动将HTTP请求升级为HTTPS
 
 ## 支持的域名映射
 
 服务支持以下GitHub相关域名的代理访问：
 
-- github.com → gh.[您的域名]
+- github.com → gh.[您的域名] 或 github-com-gh.[您的域名]
 - avatars.githubusercontent.com → avatars-githubusercontent-com-gh.[您的域名]
 - github.githubassets.com → github-githubassets-com-gh.[您的域名]
 - api.github.com → api-github-com-gh.[您的域名]
@@ -71,6 +73,71 @@ https://gh.您的域名/用户名/仓库名
 ```
 
 其他GitHub资源的访问方式类似，系统会自动处理域名映射和内容替换。
+
+## 登录与缓存说明
+
+### 登录代理
+
+登录能力依赖以下改写逻辑：
+
+- 将 GitHub 返回的 `Set-Cookie` 的 `Domain` 改写为当前代理域名
+- 将 GitHub 的 `Location` 重定向地址改写回代理域名
+- 将浏览器请求中的 `Origin` 和 `Referer` 还原为原始 GitHub 域名后再回源
+- 删除 GitHub 的 CSP 和 `clear-site-data` 响应头，避免代理域名下页面被源站策略拦截
+
+### 缓存策略
+
+默认只缓存匿名 `GET` 请求，并且仅缓存以下静态或公开资源域名：
+
+- `avatars.githubusercontent.com`
+- `github.githubassets.com`
+- `raw.githubusercontent.com`
+- `gist.githubusercontent.com`
+- `githubusercontent.com`
+- `release-assets.githubusercontent.com`
+- `assets-cdn.github.com`
+- `cdn.jsdelivr.net`
+
+以下请求不会进入边缘缓存：
+
+- 带 `Cookie` 或 `Authorization` 的请求
+- 登录、登出、会话、注册、密码重置、二次验证相关路径
+- 非 `GET` 请求
+- 非缓存域名的动态页面请求
+
+### 验证命令
+
+部署后可使用以下命令验证：
+
+```bash
+# 验证代理入口是否可访问
+curl -I https://gh.您的域名/
+
+# 验证登录页是否返回 Set-Cookie，且 Domain 已改写为代理域名
+curl -I https://gh.您的域名/login
+
+# 验证静态资源缓存，第二次请求应看到 x-proxy-cache: HIT
+curl -I https://github-githubassets-com-gh.您的域名/assets/primer.css
+curl -I https://github-githubassets-com-gh.您的域名/assets/primer.css
+```
+
+### 风险点
+
+- GitHub 登录流程可能随官方前端和安全策略调整而变化，生产使用前需要完整验证登录、二次验证、登出和私有仓库访问。
+- Worker Cache 是边缘缓存，错误缓存登录态响应会造成数据泄露风险，因此当前实现默认只缓存匿名静态资源。
+- 如果前面还有企业代理、WAF 或出口代理，请同时检查 `NO_PROXY` 是否需要包含内网地址、Kubernetes Service 网段和常见本地域名，避免内部访问被错误转发。
+
+### 回滚方案
+
+```bash
+# 回滚到主分支当前线上版本
+git checkout main
+wrangler deploy
+
+# 或者回滚单个 Worker 版本
+wrangler deployments list
+wrangler rollback
+```
 
 ## 技术说明
 
