@@ -1,5 +1,4 @@
-name = "gh"
+name = "gh-234445-xyz"
 main = "src/index.js"
 compatibility_date = "2024-04-06"
-
 

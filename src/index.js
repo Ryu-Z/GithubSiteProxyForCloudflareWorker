@@ -34,6 +34,7 @@ const enable_geo_redirect = true;
 
 // 缓存默认只覆盖匿名静态资源，避免把登录态、私有仓库或动态页面缓存到边缘节点。
 const enable_cache = true;
+const cache_version = 'v2-no-transform';
 const cache_ttl_seconds = 14400;
 const cacheable_hosts = new Set([
   'avatars.githubusercontent.com',
@@ -287,6 +288,10 @@ async function buildProxyResponse(response, route, effective_host, cache_context
     let text = await response.text();
     text = await modifyText(text, route, effective_host);
 
+    if (content_type.includes('text/html')) {
+      headers.set('content-security-policy', buildProxyContentSecurityPolicy(route, effective_host));
+    }
+
     headers.set('x-proxy-cache', cache_context.enabled ? 'MISS' : 'BYPASS');
     return new Response(text, {
       status: response.status,
@@ -315,12 +320,45 @@ function buildResponseHeaders(source_headers, route, effective_host, cache_conte
   }
 
   if (cache_context.enabled) {
-    headers.set('cache-control', `public, max-age=${cache_ttl_seconds}`);
+    headers.set('cache-control', `public, max-age=${cache_ttl_seconds}, no-transform`);
   } else if (isLoginOrSessionPath(new URL(cache_context.target_url).pathname) || hasSetCookie(source_headers)) {
-    headers.set('cache-control', 'private, no-store');
+    headers.set('cache-control', 'private, no-store, no-transform');
+  } else {
+    headers.set('cache-control', addNoTransform(headers.get('cache-control')));
   }
 
   return headers;
+}
+
+function addNoTransform(cache_control) {
+  if (!cache_control) {
+    return 'no-transform';
+  }
+
+  return /\bno-transform\b/i.test(cache_control) ? cache_control : `${cache_control}, no-transform`;
+}
+
+function buildProxyContentSecurityPolicy(route, effective_host) {
+  const domain_suffix = getDomainSuffix(route.host_prefix, effective_host);
+  const github_proxy = `https://${getProxyHost(github_host, domain_suffix, route.use_short_github_prefix)}`;
+  const assets_proxy = `https://${getProxyHost('github.githubassets.com', domain_suffix, route.use_short_github_prefix)}`;
+
+  return [
+    "default-src 'self'",
+    "base-uri 'self'",
+    `connect-src * data: blob:`,
+    `font-src 'self' ${assets_proxy} data:`,
+    `form-action 'self' ${github_proxy} https://github.com`,
+    `frame-src *`,
+    `img-src * data: blob:`,
+    `manifest-src 'self'`,
+    `media-src * data: blob:`,
+    `script-src 'self' 'unsafe-inline' 'unsafe-eval' ${assets_proxy}`,
+    `script-src-elem 'self' 'unsafe-inline' ${assets_proxy}`,
+    `style-src 'self' 'unsafe-inline' ${assets_proxy}`,
+    `style-src-elem 'self' 'unsafe-inline' ${assets_proxy}`,
+    `worker-src 'self' ${assets_proxy} blob:`
+  ].join('; ');
 }
 
 function getCacheContext(request, target_url, target_host) {
@@ -333,8 +371,14 @@ function getCacheContext(request, target_url, target_host) {
   return {
     enabled,
     target_url: target_url.href,
-    key: new Request(target_url.href, { method: 'GET' })
+    key: new Request(buildCacheKeyUrl(target_url), { method: 'GET' })
   };
+}
+
+function buildCacheKeyUrl(target_url) {
+  const cache_key_url = new URL(target_url.href);
+  cache_key_url.searchParams.set('__proxy_cache_version', cache_version);
+  return cache_key_url.href;
 }
 
 function isCacheableProxyResponse(response) {
@@ -507,7 +551,16 @@ async function modifyText(text, route, effective_hostname) {
     );
   }
 
-  return text;
+  return stripCloudflareInsights(text);
+}
+
+function stripCloudflareInsights(text) {
+  return text
+    .replace(/<script\b[^>]*\bsrc=["']https:\/\/static\.cloudflareinsights\.com\/[^"']*["'][^>]*>\s*<\/script>/gi, '')
+    .replace(/<script\b[^>]*\bdata-cf-beacon=["'][\s\S]*?<\/script>/gi, '')
+    .replace(/<link\b[^>]*\bhref=["']https:\/\/static\.cloudflareinsights\.com\/[^"']*["'][^>]*>/gi, '')
+    .replace(/import\(["']https:\/\/static\.cloudflareinsights\.com\/[^"']*["']\)/gi, 'Promise.resolve()')
+    .replace(/import\(["']\/cdn-cgi\/rum[^"']*["']\)/gi, 'Promise.resolve()');
 }
 
 function modifyUrl(url_str, route, effective_hostname) {
